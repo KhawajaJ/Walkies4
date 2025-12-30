@@ -510,15 +510,31 @@ export default function GeneratePage() {
                   ))}
                 </div>
 
-                {/* Actions */}
-                <div className="flex gap-4 mt-6">
-                  <button
-                    onClick={handleSave}
-                    className="flex-1 py-3 bg-green-600 text-white rounded-xl font-semibold hover:bg-green-700 transition-colors flex items-center justify-center gap-2"
-                  >
-                    <Save className="h-5 w-5" />
-                    Save Walk
-                  </button>
+               {/* Actions */}
+<div className="flex gap-4 mt-6">
+  <button
+    onClick={() => {
+      sessionStorage.setItem('activeWalk', JSON.stringify({ pois, locationName }))
+      router.push('/walk/active')
+    }}
+    className="flex-1 py-3 bg-green-600 text-white rounded-xl font-semibold hover:bg-green-700 transition-colors flex items-center justify-center gap-2"
+  >
+    <Navigation className="h-5 w-5" />
+    Start Walk
+  </button>
+  <button
+    onClick={handleSave}
+    className="py-3 px-4 bg-gray-100 text-gray-700 rounded-xl font-semibold hover:bg-gray-200 transition-colors"
+  >
+    <Save className="h-5 w-5" />
+  </button>
+  <button
+    onClick={handleGenerate}
+    className="py-3 px-4 bg-gray-100 text-gray-700 rounded-xl font-semibold hover:bg-gray-200 transition-colors"
+  >
+    <RefreshCw className="h-5 w-5" />
+  </button>
+</div>
                   <button
                     onClick={handleGenerate}
                     className="flex-1 py-3 bg-gray-100 text-gray-700 rounded-xl font-semibold hover:bg-gray-200 transition-colors flex items-center justify-center gap-2"
