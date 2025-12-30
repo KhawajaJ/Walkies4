@@ -1,36 +1,191 @@
 'use client'
 
-import { useState } from 'react'
+import { useState, useEffect } from 'react'
 import { useRouter } from 'next/navigation'
-import { MapPin, Clock, RefreshCw, Save, ArrowLeft, Sparkles } from 'lucide-react'
+import { MapPin, Clock, RefreshCw, Save, ArrowLeft, Sparkles, Navigation, Loader2 } from 'lucide-react'
+import dynamic from 'next/dynamic'
+
+// Load map dynamically (no SSR)
+const Map = dynamic(() => import('@/components/Map'), { ssr: false })
+
+interface POI {
+  id: string
+  name: string
+  type: string
+  lat: number
+  lng: number
+  distance?: number
+}
 
 const INTERESTS = [
-  { id: 'historic', label: 'Historic', emoji: '🏛️' },
-  { id: 'architecture', label: 'Architecture', emoji: '🏗️' },
-  { id: 'parks', label: 'Parks & Nature', emoji: '🌳' },
-  { id: 'food', label: 'Food & Cafes', emoji: '☕' },
-  { id: 'art', label: 'Street Art', emoji: '🎨' },
-  { id: 'shopping', label: 'Shopping', emoji: '🛍️' },
-  { id: 'photo', label: 'Photo Spots', emoji: '📸' },
-  { id: 'local', label: 'Local Gems', emoji: '💎' },
-]
-
-const MOCK_STOPS = [
-  { name: 'Brandenburg Gate', type: 'Historic landmark', time: '20 min', emoji: '🏛️' },
-  { name: 'Memorial to the Murdered Jews', type: 'Memorial', time: '15 min', emoji: '🕯️' },
-  { name: 'Tiergarten Park', type: 'Park & Nature', time: '25 min', emoji: '🌳' },
-  { name: 'Victory Column', type: 'Historic viewpoint', time: '15 min', emoji: '🏆' },
-  { name: 'Potsdamer Platz', type: 'Modern architecture', time: '20 min', emoji: '🏙️' },
+  { id: 'tourism', label: 'Tourist Spots', emoji: '📸', osmTag: 'tourism' },
+  { id: 'historic', label: 'Historic', emoji: '🏛️', osmTag: 'historic' },
+  { id: 'museum', label: 'Museums', emoji: '🖼️', osmTag: 'museum' },
+  { id: 'park', label: 'Parks & Nature', emoji: '🌳', osmTag: 'leisure=park' },
+  { id: 'religious', label: 'Religious Sites', emoji: '⛪', osmTag: 'amenity=place_of_worship' },
+  { id: 'viewpoint', label: 'Viewpoints', emoji: '🏔️', osmTag: 'tourism=viewpoint' },
 ]
 
 export default function GeneratePage() {
   const [duration, setDuration] = useState(90)
-  const [selectedInterests, setSelectedInterests] = useState<string[]>(['historic', 'architecture'])
-  const [vibe, setVibe] = useState('balanced')
-  const [pace, setPace] = useState('moderate')
+  const [selectedInterests, setSelectedInterests] = useState<string[]>(['tourism', 'historic'])
   const [loading, setLoading] = useState(false)
+  const [loadingLocation, setLoadingLocation] = useState(false)
   const [generated, setGenerated] = useState(false)
+  const [userLocation, setUserLocation] = useState<[number, number] | null>(null)
+  const [locationName, setLocationName] = useState('')
+  const [pois, setPois] = useState<POI[]>([])
+  const [route, setRoute] = useState<[number, number][]>([])
+  const [error, setError] = useState('')
   const router = useRouter()
+
+  // Get user's location on page load
+  useEffect(() => {
+    getUserLocation()
+  }, [])
+
+  const getUserLocation = () => {
+    setLoadingLocation(true)
+    setError('')
+    
+    if (!navigator.geolocation) {
+      setError('Geolocation is not supported by your browser')
+      setLoadingLocation(false)
+      return
+    }
+
+    navigator.geolocation.getCurrentPosition(
+      async (position) => {
+        const { latitude, longitude } = position.coords
+        setUserLocation([longitude, latitude])
+        
+        // Get location name via reverse geocoding
+        try {
+          const response = await fetch(
+            `https://nominatim.openstreetmap.org/reverse?lat=${latitude}&lon=${longitude}&format=json`
+          )
+          const data = await response.json()
+          setLocationName(data.address?.city || data.address?.town || data.address?.village || 'Your Location')
+        } catch {
+          setLocationName('Your Location')
+        }
+        
+        setLoadingLocation(false)
+      },
+      (err) => {
+        setError('Unable to get your location. Please enable location access.')
+        setLoadingLocation(false)
+        // Default to Berlin if location fails
+        setUserLocation([13.405, 52.52])
+        setLocationName('Berlin (default)')
+      },
+      { enableHighAccuracy: true, timeout: 10000 }
+    )
+  }
+
+  const fetchPOIs = async () => {
+    if (!userLocation) return []
+
+    const [lng, lat] = userLocation
+    const radius = Math.min(duration * 20, 3000) // Rough estimate: ~20m per minute of walking
+
+    // Build Overpass query based on selected interests
+    const tags = selectedInterests.map(interest => {
+      const found = INTERESTS.find(i => i.id === interest)
+      return found?.osmTag || ''
+    }).filter(Boolean)
+
+    const overpassQuery = `
+      [out:json][timeout:25];
+      (
+        ${tags.map(tag => {
+          if (tag.includes('=')) {
+            return `node[${tag}](around:${radius},${lat},${lng});`
+          }
+          return `node["${tag}"](around:${radius},${lat},${lng});`
+        }).join('\n')}
+      );
+      out body;
+    `
+
+    try {
+      const response = await fetch('https://overpass-api.de/api/interpreter', {
+        method: 'POST',
+        body: overpassQuery,
+      })
+      
+      const data = await response.json()
+      
+      const fetchedPOIs: POI[] = data.elements
+        .filter((el: any) => el.tags?.name)
+        .map((el: any) => ({
+          id: el.id.toString(),
+          name: el.tags.name,
+          type: el.tags.tourism || el.tags.historic || el.tags.amenity || el.tags.leisure || 'Point of Interest',
+          lat: el.lat,
+          lng: el.lon,
+          distance: calculateDistance(lat, lng, el.lat, el.lon),
+        }))
+        .sort((a: POI, b: POI) => (a.distance || 0) - (b.distance || 0))
+        .slice(0, 10) // Limit to 10 POIs
+
+      return fetchedPOIs
+    } catch (err) {
+      console.error('Error fetching POIs:', err)
+      setError('Failed to fetch points of interest. Please try again.')
+      return []
+    }
+  }
+
+  const calculateDistance = (lat1: number, lon1: number, lat2: number, lon2: number): number => {
+    const R = 6371e3 // Earth's radius in meters
+    const φ1 = (lat1 * Math.PI) / 180
+    const φ2 = (lat2 * Math.PI) / 180
+    const Δφ = ((lat2 - lat1) * Math.PI) / 180
+    const Δλ = ((lon2 - lon1) * Math.PI) / 180
+
+    const a = Math.sin(Δφ / 2) * Math.sin(Δφ / 2) +
+              Math.cos(φ1) * Math.cos(φ2) *
+              Math.sin(Δλ / 2) * Math.sin(Δλ / 2)
+    const c = 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a))
+
+    return R * c // Distance in meters
+  }
+
+  const generateRoute = (fetchedPOIs: POI[]): [number, number][] => {
+    if (!userLocation || fetchedPOIs.length === 0) return []
+    
+    // Simple route: start from user location, visit POIs in order of distance
+    const routePoints: [number, number][] = [userLocation]
+    fetchedPOIs.forEach(poi => {
+      routePoints.push([poi.lng, poi.lat])
+    })
+    
+    return routePoints
+  }
+
+  const handleGenerate = async () => {
+    if (!userLocation) {
+      setError('Please enable location access to generate a walk')
+      return
+    }
+
+    setLoading(true)
+    setError('')
+    
+    const fetchedPOIs = await fetchPOIs()
+    
+    if (fetchedPOIs.length === 0) {
+      setError('No points of interest found nearby. Try selecting different interests or increasing duration.')
+      setLoading(false)
+      return
+    }
+
+    setPois(fetchedPOIs)
+    setRoute(generateRoute(fetchedPOIs))
+    setGenerated(true)
+    setLoading(false)
+  }
 
   const toggleInterest = (id: string) => {
     setSelectedInterests(prev =>
@@ -38,18 +193,17 @@ export default function GeneratePage() {
     )
   }
 
-  const handleGenerate = async () => {
-    setLoading(true)
-    // Simulate API call
-    await new Promise(resolve => setTimeout(resolve, 2000))
-    setGenerated(true)
-    setLoading(false)
-  }
-
   const handleSave = () => {
     alert('Walk saved! (This would save to your profile)')
     router.push('/dashboard')
   }
+
+  const formatDistance = (meters: number): string => {
+    if (meters < 1000) return `${Math.round(meters)}m`
+    return `${(meters / 1000).toFixed(1)}km`
+  }
+
+  const totalDistance = pois.reduce((sum, poi) => sum + (poi.distance || 0), 0)
 
   return (
     <div className="min-h-screen bg-gray-50">
@@ -75,6 +229,37 @@ export default function GeneratePage() {
         <div className="grid lg:grid-cols-3 gap-8">
           {/* Form Panel */}
           <div className="lg:col-span-1 space-y-6">
+            {/* Location */}
+            <div className="bg-white rounded-xl shadow-sm p-6">
+              <div className="flex items-center justify-between mb-4">
+                <div className="flex items-center gap-2">
+                  <Navigation className="h-5 w-5 text-blue-600" />
+                  <h2 className="font-bold text-gray-900">Starting Point</h2>
+                </div>
+                <button
+                  onClick={getUserLocation}
+                  disabled={loadingLocation}
+                  className="text-blue-600 text-sm hover:underline disabled:opacity-50"
+                >
+                  {loadingLocation ? 'Finding...' : 'Update'}
+                </button>
+              </div>
+              
+              {loadingLocation ? (
+                <div className="flex items-center gap-2 text-gray-500">
+                  <Loader2 className="h-4 w-4 animate-spin" />
+                  <span>Getting your location...</span>
+                </div>
+              ) : userLocation ? (
+                <div className="flex items-center gap-2">
+                  <MapPin className="h-5 w-5 text-green-600" />
+                  <span className="font-medium">{locationName}</span>
+                </div>
+              ) : (
+                <p className="text-gray-500">Location not available</p>
+              )}
+            </div>
+
             {/* Duration */}
             <div className="bg-white rounded-xl shadow-sm p-6">
               <div className="flex items-center gap-2 mb-4">
@@ -102,7 +287,7 @@ export default function GeneratePage() {
 
             {/* Interests */}
             <div className="bg-white rounded-xl shadow-sm p-6">
-              <h2 className="font-bold text-gray-900 mb-4">Interests</h2>
+              <h2 className="font-bold text-gray-900 mb-4">What do you want to see?</h2>
               <div className="grid grid-cols-2 gap-2">
                 {INTERESTS.map(interest => (
                   <button
@@ -121,56 +306,23 @@ export default function GeneratePage() {
               </div>
             </div>
 
-            {/* Vibe */}
-            <div className="bg-white rounded-xl shadow-sm p-6">
-              <h2 className="font-bold text-gray-900 mb-4">Vibe</h2>
-              <div className="grid grid-cols-3 gap-2">
-                {['quiet', 'balanced', 'lively'].map(v => (
-                  <button
-                    key={v}
-                    onClick={() => setVibe(v)}
-                    className={`py-3 px-4 rounded-xl capitalize font-medium transition-all ${
-                      vibe === v
-                        ? 'bg-blue-600 text-white'
-                        : 'bg-gray-100 text-gray-700 hover:bg-gray-200'
-                    }`}
-                  >
-                    {v}
-                  </button>
-                ))}
+            {/* Error Message */}
+            {error && (
+              <div className="bg-red-50 text-red-600 p-4 rounded-xl text-sm">
+                {error}
               </div>
-            </div>
-
-            {/* Pace */}
-            <div className="bg-white rounded-xl shadow-sm p-6">
-              <h2 className="font-bold text-gray-900 mb-4">Pace</h2>
-              <div className="grid grid-cols-3 gap-2">
-                {['slow', 'moderate', 'fast'].map(p => (
-                  <button
-                    key={p}
-                    onClick={() => setPace(p)}
-                    className={`py-3 px-4 rounded-xl capitalize font-medium transition-all ${
-                      pace === p
-                        ? 'bg-blue-600 text-white'
-                        : 'bg-gray-100 text-gray-700 hover:bg-gray-200'
-                    }`}
-                  >
-                    {p}
-                  </button>
-                ))}
-              </div>
-            </div>
+            )}
 
             {/* Generate Button */}
             <button
               onClick={handleGenerate}
-              disabled={loading || selectedInterests.length === 0}
+              disabled={loading || !userLocation || selectedInterests.length === 0}
               className="w-full py-4 bg-gradient-to-r from-blue-600 to-purple-600 text-white rounded-xl font-bold hover:from-blue-700 hover:to-purple-700 disabled:opacity-50 disabled:cursor-not-allowed transition-all flex items-center justify-center gap-2"
             >
               {loading ? (
                 <>
                   <RefreshCw className="h-5 w-5 animate-spin" />
-                  Generating...
+                  Finding places...
                 </>
               ) : (
                 <>
@@ -181,79 +333,73 @@ export default function GeneratePage() {
             </button>
           </div>
 
-          {/* Results Panel */}
-          <div className="lg:col-span-2">
-            {!generated ? (
-              <div className="bg-white rounded-xl shadow-sm p-8 h-full flex flex-col items-center justify-center text-center">
-                <div className="w-20 h-20 bg-blue-100 rounded-full flex items-center justify-center mb-6">
-                  <MapPin className="h-10 w-10 text-blue-600" />
+          {/* Map & Results Panel */}
+          <div className="lg:col-span-2 space-y-6">
+            {/* Map */}
+            <div className="bg-white rounded-xl shadow-sm overflow-hidden" style={{ height: '400px' }}>
+              {userLocation ? (
+                <Map 
+                  center={userLocation} 
+                  pois={pois}
+                  route={generated ? route : undefined}
+                />
+              ) : (
+                <div className="h-full flex items-center justify-center bg-gray-100">
+                  <div className="text-center">
+                    <MapPin className="h-12 w-12 text-gray-400 mx-auto mb-2" />
+                    <p className="text-gray-500">Enable location to see the map</p>
+                  </div>
                 </div>
-                <h3 className="text-xl font-bold text-gray-900 mb-2">Your Route Will Appear Here</h3>
-                <p className="text-gray-500 max-w-md">
-                  Set your preferences on the left and click "Generate Walk" to create a personalized walking route.
-                </p>
-              </div>
-            ) : (
-              <div className="space-y-6">
-                {/* Map Placeholder */}
-                <div className="bg-white rounded-xl shadow-sm overflow-hidden">
-                  <div className="bg-gradient-to-br from-blue-100 to-green-100 h-64 flex items-center justify-center">
-                    <div className="text-center">
-                      <MapPin className="h-12 w-12 text-blue-600 mx-auto mb-2" />
-                      <p className="text-gray-600">Interactive map would appear here</p>
-                      <p className="text-sm text-gray-500">Powered by MapLibre</p>
-                    </div>
+              )}
+            </div>
+
+            {/* Results */}
+            {generated && pois.length > 0 && (
+              <div className="bg-white rounded-xl shadow-sm p-6">
+                <div className="flex justify-between items-start mb-6">
+                  <div>
+                    <h3 className="text-xl font-bold text-gray-900">Your {locationName} Walking Route</h3>
+                    <p className="text-gray-500">{pois.length} stops • ~{formatDistance(totalDistance)}</p>
+                  </div>
+                  <div className="text-right">
+                    <div className="text-2xl font-bold text-blue-600">{duration} min</div>
                   </div>
                 </div>
 
-                {/* Route Summary */}
-                <div className="bg-white rounded-xl shadow-sm p-6">
-                  <div className="flex justify-between items-start mb-6">
-                    <div>
-                      <h3 className="text-xl font-bold text-gray-900">Your Berlin Walking Route</h3>
-                      <p className="text-gray-500">A {vibe} walk at {pace} pace</p>
-                    </div>
-                    <div className="text-right">
-                      <div className="text-2xl font-bold text-blue-600">{duration} min</div>
-                      <div className="text-gray-500">~3.2 km</div>
-                    </div>
-                  </div>
-
-                  {/* Stops */}
-                  <div className="space-y-3">
-                    {MOCK_STOPS.map((stop, index) => (
-                      <div key={index} className="flex items-center gap-4 p-4 bg-gray-50 rounded-xl">
-                        <div className="w-10 h-10 bg-blue-100 rounded-full flex items-center justify-center text-lg">
-                          {stop.emoji}
-                        </div>
-                        <div className="flex-1">
-                          <div className="font-semibold text-gray-900">{stop.name}</div>
-                          <div className="text-sm text-gray-500">{stop.type}</div>
-                        </div>
-                        <div className="text-sm text-gray-500 bg-white px-3 py-1 rounded-full">
-                          {stop.time}
-                        </div>
+                {/* Stops */}
+                <div className="space-y-3">
+                  {pois.map((poi, index) => (
+                    <div key={poi.id} className="flex items-center gap-4 p-4 bg-gray-50 rounded-xl">
+                      <div className="w-10 h-10 bg-blue-100 rounded-full flex items-center justify-center text-blue-600 font-bold">
+                        {index + 1}
                       </div>
-                    ))}
-                  </div>
+                      <div className="flex-1">
+                        <div className="font-semibold text-gray-900">{poi.name}</div>
+                        <div className="text-sm text-gray-500 capitalize">{poi.type}</div>
+                      </div>
+                      <div className="text-sm text-gray-500 bg-white px-3 py-1 rounded-full">
+                        {formatDistance(poi.distance || 0)}
+                      </div>
+                    </div>
+                  ))}
+                </div>
 
-                  {/* Actions */}
-                  <div className="flex gap-4 mt-6">
-                    <button
-                      onClick={handleSave}
-                      className="flex-1 py-3 bg-green-600 text-white rounded-xl font-semibold hover:bg-green-700 transition-colors flex items-center justify-center gap-2"
-                    >
-                      <Save className="h-5 w-5" />
-                      Save Walk
-                    </button>
-                    <button
-                      onClick={handleGenerate}
-                      className="flex-1 py-3 bg-gray-100 text-gray-700 rounded-xl font-semibold hover:bg-gray-200 transition-colors flex items-center justify-center gap-2"
-                    >
-                      <RefreshCw className="h-5 w-5" />
-                      Regenerate
-                    </button>
-                  </div>
+                {/* Actions */}
+                <div className="flex gap-4 mt-6">
+                  <button
+                    onClick={handleSave}
+                    className="flex-1 py-3 bg-green-600 text-white rounded-xl font-semibold hover:bg-green-700 transition-colors flex items-center justify-center gap-2"
+                  >
+                    <Save className="h-5 w-5" />
+                    Save Walk
+                  </button>
+                  <button
+                    onClick={handleGenerate}
+                    className="flex-1 py-3 bg-gray-100 text-gray-700 rounded-xl font-semibold hover:bg-gray-200 transition-colors flex items-center justify-center gap-2"
+                  >
+                    <RefreshCw className="h-5 w-5" />
+                    Regenerate
+                  </button>
                 </div>
               </div>
             )}
