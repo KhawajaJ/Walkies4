@@ -2,10 +2,9 @@
 
 import { useState, useEffect } from 'react'
 import { useRouter } from 'next/navigation'
-import { MapPin, Clock, RefreshCw, Save, ArrowLeft, Sparkles, Navigation, Loader2 } from 'lucide-react'
+import { MapPin, Clock, RefreshCw, Save, ArrowLeft, Sparkles, Navigation, Loader2, Info } from 'lucide-react'
 import dynamic from 'next/dynamic'
 
-// Load map dynamically (no SSR)
 const Map = dynamic(() => import('@/components/Map'), { ssr: false })
 
 interface POI {
@@ -15,6 +14,8 @@ interface POI {
   lat: number
   lng: number
   distance?: number
+  image?: string
+  summary?: string
 }
 
 const INTERESTS = [
@@ -29,6 +30,8 @@ const INTERESTS = [
 export default function GeneratePage() {
   const [duration, setDuration] = useState(90)
   const [selectedInterests, setSelectedInterests] = useState<string[]>(['tourism', 'historic'])
+  const [vibe, setVibe] = useState('balanced')
+  const [pace, setPace] = useState('moderate')
   const [loading, setLoading] = useState(false)
   const [loadingLocation, setLoadingLocation] = useState(false)
   const [generated, setGenerated] = useState(false)
@@ -37,9 +40,9 @@ export default function GeneratePage() {
   const [pois, setPois] = useState<POI[]>([])
   const [route, setRoute] = useState<[number, number][]>([])
   const [error, setError] = useState('')
+  const [hoveredPoi, setHoveredPoi] = useState<string | null>(null)
   const router = useRouter()
 
-  // Get user's location on page load
   useEffect(() => {
     getUserLocation()
   }, [])
@@ -59,7 +62,6 @@ export default function GeneratePage() {
         const { latitude, longitude } = position.coords
         setUserLocation([longitude, latitude])
         
-        // Get location name via reverse geocoding
         try {
           const response = await fetch(
             `https://nominatim.openstreetmap.org/reverse?lat=${latitude}&lon=${longitude}&format=json`
@@ -75,7 +77,6 @@ export default function GeneratePage() {
       (err) => {
         setError('Unable to get your location. Please enable location access.')
         setLoadingLocation(false)
-        // Default to Berlin if location fails
         setUserLocation([13.405, 52.52])
         setLocationName('Berlin (default)')
       },
@@ -83,13 +84,52 @@ export default function GeneratePage() {
     )
   }
 
+  const fetchWikipediaInfo = async (name: string, lat: number, lng: number): Promise<{ image?: string; summary?: string }> => {
+    try {
+      // Search Wikipedia for the place
+      const searchResponse = await fetch(
+        `https://en.wikipedia.org/w/api.php?action=query&list=geosearch&gscoord=${lat}|${lng}&gsradius=500&gslimit=5&format=json&origin=*`
+      )
+      const searchData = await searchResponse.json()
+      
+      let pageId = searchData.query?.geosearch?.[0]?.pageid
+      
+      // If no geo result, try text search
+      if (!pageId) {
+        const textSearch = await fetch(
+          `https://en.wikipedia.org/w/api.php?action=query&list=search&srsearch=${encodeURIComponent(name)}&srlimit=1&format=json&origin=*`
+        )
+        const textData = await textSearch.json()
+        pageId = textData.query?.search?.[0]?.pageid
+      }
+      
+      if (!pageId) return {}
+      
+      // Get page details with image and extract
+      const detailsResponse = await fetch(
+        `https://en.wikipedia.org/w/api.php?action=query&pageids=${pageId}&prop=pageimages|extracts&pithumbsize=200&exintro&explaintext&exsentences=2&format=json&origin=*`
+      )
+      const detailsData = await detailsResponse.json()
+      const page = detailsData.query?.pages?.[pageId]
+      
+      return {
+        image: page?.thumbnail?.source,
+        summary: page?.extract?.substring(0, 150) + (page?.extract?.length > 150 ? '...' : ''),
+      }
+    } catch {
+      return {}
+    }
+  }
+
   const fetchPOIs = async () => {
     if (!userLocation) return []
 
     const [lng, lat] = userLocation
-    const radius = Math.min(duration * 20, 3000) // Rough estimate: ~20m per minute of walking
+    
+    // Adjust radius based on pace and duration
+    const paceMultiplier = pace === 'slow' ? 15 : pace === 'fast' ? 30 : 20
+    const radius = Math.min(duration * paceMultiplier, 5000)
 
-    // Build Overpass query based on selected interests
     const tags = selectedInterests.map(interest => {
       const found = INTERESTS.find(i => i.id === interest)
       return found?.osmTag || ''
@@ -116,7 +156,7 @@ export default function GeneratePage() {
       
       const data = await response.json()
       
-      const fetchedPOIs: POI[] = data.elements
+      let fetchedPOIs: POI[] = data.elements
         .filter((el: any) => el.tags?.name)
         .map((el: any) => ({
           id: el.id.toString(),
@@ -127,9 +167,29 @@ export default function GeneratePage() {
           distance: calculateDistance(lat, lng, el.lat, el.lon),
         }))
         .sort((a: POI, b: POI) => (a.distance || 0) - (b.distance || 0))
-        .slice(0, 10) // Limit to 10 POIs
 
-      return fetchedPOIs
+      // Filter based on vibe
+      if (vibe === 'quiet') {
+        fetchedPOIs = fetchedPOIs.filter(poi => 
+          ['park', 'memorial', 'artwork', 'viewpoint', 'garden'].some(t => poi.type.toLowerCase().includes(t))
+        ).slice(0, 8)
+      } else if (vibe === 'lively') {
+        fetchedPOIs = fetchedPOIs.filter(poi => 
+          ['museum', 'attraction', 'monument', 'castle', 'church'].some(t => poi.type.toLowerCase().includes(t))
+        ).slice(0, 12)
+      } else {
+        fetchedPOIs = fetchedPOIs.slice(0, 10)
+      }
+
+      // Fetch Wikipedia info for each POI (limit to first 8 to avoid rate limiting)
+      const poisWithInfo = await Promise.all(
+        fetchedPOIs.slice(0, 8).map(async (poi) => {
+          const wikiInfo = await fetchWikipediaInfo(poi.name, poi.lat, poi.lng)
+          return { ...poi, ...wikiInfo }
+        })
+      )
+
+      return poisWithInfo
     } catch (err) {
       console.error('Error fetching POIs:', err)
       setError('Failed to fetch points of interest. Please try again.')
@@ -138,7 +198,7 @@ export default function GeneratePage() {
   }
 
   const calculateDistance = (lat1: number, lon1: number, lat2: number, lon2: number): number => {
-    const R = 6371e3 // Earth's radius in meters
+    const R = 6371e3
     const φ1 = (lat1 * Math.PI) / 180
     const φ2 = (lat2 * Math.PI) / 180
     const Δφ = ((lat2 - lat1) * Math.PI) / 180
@@ -149,13 +209,12 @@ export default function GeneratePage() {
               Math.sin(Δλ / 2) * Math.sin(Δλ / 2)
     const c = 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a))
 
-    return R * c // Distance in meters
+    return R * c
   }
 
   const generateRoute = (fetchedPOIs: POI[]): [number, number][] => {
     if (!userLocation || fetchedPOIs.length === 0) return []
     
-    // Simple route: start from user location, visit POIs in order of distance
     const routePoints: [number, number][] = [userLocation]
     fetchedPOIs.forEach(poi => {
       routePoints.push([poi.lng, poi.lat])
@@ -204,6 +263,7 @@ export default function GeneratePage() {
   }
 
   const totalDistance = pois.reduce((sum, poi) => sum + (poi.distance || 0), 0)
+  const estimatedTime = Math.round(totalDistance / (pace === 'slow' ? 50 : pace === 'fast' ? 83 : 67))
 
   return (
     <div className="min-h-screen bg-gray-50">
@@ -306,6 +366,46 @@ export default function GeneratePage() {
               </div>
             </div>
 
+            {/* Vibe */}
+            <div className="bg-white rounded-xl shadow-sm p-6">
+              <h2 className="font-bold text-gray-900 mb-4">Vibe</h2>
+              <div className="grid grid-cols-3 gap-2">
+                {['quiet', 'balanced', 'lively'].map(v => (
+                  <button
+                    key={v}
+                    onClick={() => setVibe(v)}
+                    className={`py-3 px-4 rounded-xl capitalize font-medium transition-all ${
+                      vibe === v
+                        ? 'bg-blue-600 text-white'
+                        : 'bg-gray-100 text-gray-700 hover:bg-gray-200'
+                    }`}
+                  >
+                    {v}
+                  </button>
+                ))}
+              </div>
+            </div>
+
+            {/* Pace */}
+            <div className="bg-white rounded-xl shadow-sm p-6">
+              <h2 className="font-bold text-gray-900 mb-4">Pace</h2>
+              <div className="grid grid-cols-3 gap-2">
+                {['slow', 'moderate', 'fast'].map(p => (
+                  <button
+                    key={p}
+                    onClick={() => setPace(p)}
+                    className={`py-3 px-4 rounded-xl capitalize font-medium transition-all ${
+                      pace === p
+                        ? 'bg-blue-600 text-white'
+                        : 'bg-gray-100 text-gray-700 hover:bg-gray-200'
+                    }`}
+                  >
+                    {p}
+                  </button>
+                ))}
+              </div>
+            </div>
+
             {/* Error Message */}
             {error && (
               <div className="bg-red-50 text-red-600 p-4 rounded-xl text-sm">
@@ -359,27 +459,53 @@ export default function GeneratePage() {
                 <div className="flex justify-between items-start mb-6">
                   <div>
                     <h3 className="text-xl font-bold text-gray-900">Your {locationName} Walking Route</h3>
-                    <p className="text-gray-500">{pois.length} stops • ~{formatDistance(totalDistance)}</p>
+                    <p className="text-gray-500">{pois.length} stops • ~{formatDistance(totalDistance)} • {estimatedTime} min walk</p>
                   </div>
                   <div className="text-right">
-                    <div className="text-2xl font-bold text-blue-600">{duration} min</div>
+                    <div className="text-sm text-gray-500 capitalize">{vibe} • {pace} pace</div>
                   </div>
                 </div>
 
                 {/* Stops */}
                 <div className="space-y-3">
                   {pois.map((poi, index) => (
-                    <div key={poi.id} className="flex items-center gap-4 p-4 bg-gray-50 rounded-xl">
-                      <div className="w-10 h-10 bg-blue-100 rounded-full flex items-center justify-center text-blue-600 font-bold">
-                        {index + 1}
-                      </div>
+                    <div 
+                      key={poi.id} 
+                      className="relative flex items-center gap-4 p-4 bg-gray-50 rounded-xl hover:bg-gray-100 transition-colors cursor-pointer"
+                      onMouseEnter={() => setHoveredPoi(poi.id)}
+                      onMouseLeave={() => setHoveredPoi(null)}
+                    >
+                      {/* Image or Number */}
+                      {poi.image ? (
+                        <img 
+                          src={poi.image} 
+                          alt={poi.name}
+                          className="w-14 h-14 rounded-lg object-cover"
+                        />
+                      ) : (
+                        <div className="w-14 h-14 bg-blue-100 rounded-lg flex items-center justify-center text-blue-600 font-bold text-lg">
+                          {index + 1}
+                        </div>
+                      )}
+                      
                       <div className="flex-1">
                         <div className="font-semibold text-gray-900">{poi.name}</div>
                         <div className="text-sm text-gray-500 capitalize">{poi.type}</div>
                       </div>
+                      
                       <div className="text-sm text-gray-500 bg-white px-3 py-1 rounded-full">
                         {formatDistance(poi.distance || 0)}
                       </div>
+
+                      {/* Hover Tooltip */}
+                      {hoveredPoi === poi.id && poi.summary && (
+                        <div className="absolute left-0 right-0 top-full mt-2 z-20 bg-gray-900 text-white p-4 rounded-xl shadow-lg text-sm">
+                          <div className="flex items-start gap-2">
+                            <Info className="h-4 w-4 mt-0.5 flex-shrink-0" />
+                            <p>{poi.summary}</p>
+                          </div>
+                        </div>
+                      )}
                     </div>
                   ))}
                 </div>
