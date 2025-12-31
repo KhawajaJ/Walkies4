@@ -19,12 +19,18 @@ interface POI {
 }
 
 const INTERESTS = [
-  { id: 'tourism', label: 'Tourist Spots', emoji: '📸', osmTag: 'tourism' },
-  { id: 'historic', label: 'Historic', emoji: '🏛️', osmTag: 'historic' },
-  { id: 'museum', label: 'Museums', emoji: '🖼️', osmTag: 'museum' },
-  { id: 'park', label: 'Parks & Nature', emoji: '🌳', osmTag: 'leisure=park' },
+  { id: 'tourism', label: 'Tourist Spots', emoji: '📸', osmTag: 'tourism~".*"' },
+  { id: 'historic', label: 'Historic', emoji: '🏛️', osmTag: 'historic~".*"' },
+  { id: 'museum', label: 'Museums', emoji: '🖼️', osmTag: 'tourism=museum' },
+  { id: 'park', label: 'Parks & Nature', emoji: '🌳', osmTag: 'leisure~"park|garden|nature_reserve"' },
   { id: 'religious', label: 'Religious Sites', emoji: '⛪', osmTag: 'amenity=place_of_worship' },
   { id: 'viewpoint', label: 'Viewpoints', emoji: '🏔️', osmTag: 'tourism=viewpoint' },
+  { id: 'restaurant', label: 'Restaurants', emoji: '🍽️', osmTag: 'amenity=restaurant' },
+  { id: 'cafe', label: 'Cafes', emoji: '☕', osmTag: 'amenity=cafe' },
+  { id: 'bar', label: 'Bars & Pubs', emoji: '🍺', osmTag: 'amenity~"bar|pub|biergarten"' },
+  { id: 'art', label: 'Street Art', emoji: '🎨', osmTag: 'tourism=artwork' },
+  { id: 'monument', label: 'Monuments', emoji: '🗿', osmTag: 'historic~"monument|memorial|castle"' },
+  { id: 'shop', label: 'Shopping', emoji: '🛍️', osmTag: 'shop~"mall|department_store|supermarket"' },
 ]
 
 export default function GeneratePage() {
@@ -86,7 +92,6 @@ export default function GeneratePage() {
 
   const fetchWikipediaInfo = async (name: string, lat: number, lng: number): Promise<{ image?: string; summary?: string }> => {
     try {
-      // Search Wikipedia for the place
       const searchResponse = await fetch(
         `https://en.wikipedia.org/w/api.php?action=query&list=geosearch&gscoord=${lat}|${lng}&gsradius=500&gslimit=5&format=json&origin=*`
       )
@@ -94,7 +99,6 @@ export default function GeneratePage() {
       
       let pageId = searchData.query?.geosearch?.[0]?.pageid
       
-      // If no geo result, try text search
       if (!pageId) {
         const textSearch = await fetch(
           `https://en.wikipedia.org/w/api.php?action=query&list=search&srsearch=${encodeURIComponent(name)}&srlimit=1&format=json&origin=*`
@@ -105,7 +109,6 @@ export default function GeneratePage() {
       
       if (!pageId) return {}
       
-      // Get page details with image and extract
       const detailsResponse = await fetch(
         `https://en.wikipedia.org/w/api.php?action=query&pageids=${pageId}&prop=pageimages|extracts&pithumbsize=200&exintro&explaintext&exsentences=2&format=json&origin=*`
       )
@@ -126,9 +129,8 @@ export default function GeneratePage() {
 
     const [lng, lat] = userLocation
     
-    // Adjust radius based on pace and duration
-    const paceMultiplier = pace === 'slow' ? 15 : pace === 'fast' ? 30 : 20
-    const radius = Math.min(duration * paceMultiplier, 5000)
+    const paceMultiplier = pace === 'slow' ? 40 : pace === 'fast' ? 80 : 60
+    const radius = Math.min(duration * paceMultiplier, 10000)
 
     const tags = selectedInterests.map(interest => {
       const found = INTERESTS.find(i => i.id === interest)
@@ -136,16 +138,25 @@ export default function GeneratePage() {
     }).filter(Boolean)
 
     const overpassQuery = `
-      [out:json][timeout:25];
+      [out:json][timeout:30];
       (
         ${tags.map(tag => {
-          if (tag.includes('=')) {
-            return `node[${tag}](around:${radius},${lat},${lng});`
+          if (tag.includes('~')) {
+            return `node[${tag}](around:${radius},${lat},${lng});
+way[${tag}](around:${radius},${lat},${lng});`
           }
-          return `node["${tag}"](around:${radius},${lat},${lng});`
+          if (tag.includes('|')) {
+            return tag.split('|').map(t => `node[${t}](around:${radius},${lat},${lng});`).join('\n')
+          }
+          if (tag.includes('=')) {
+            return `node[${tag}](around:${radius},${lat},${lng});
+way[${tag}](around:${radius},${lat},${lng});`
+          }
+          return `node["${tag}"](around:${radius},${lat},${lng});
+way["${tag}"](around:${radius},${lat},${lng});`
         }).join('\n')}
       );
-      out body;
+      out center body;
     `
 
     try {
@@ -157,33 +168,59 @@ export default function GeneratePage() {
       const data = await response.json()
       
       let fetchedPOIs: POI[] = data.elements
-        .filter((el: any) => el.tags?.name)
-        .map((el: any) => ({
-          id: el.id.toString(),
-          name: el.tags.name,
-          type: el.tags.tourism || el.tags.historic || el.tags.amenity || el.tags.leisure || 'Point of Interest',
-          lat: el.lat,
-          lng: el.lon,
-          distance: calculateDistance(lat, lng, el.lat, el.lon),
-        }))
+        .filter((el: any) => el.tags?.name || el.tags?.tourism || el.tags?.historic)
+        .map((el: any) => {
+          const poiLat = el.lat || el.center?.lat
+          const poiLng = el.lon || el.center?.lon
+          if (!poiLat || !poiLng) return null
+          
+          return {
+            id: el.id.toString(),
+            name: el.tags.name || el.tags.tourism || el.tags.historic || 'Unnamed Place',
+            type: el.tags.tourism || el.tags.historic || el.tags.amenity || el.tags.leisure || el.tags.shop || 'Point of Interest',
+            lat: poiLat,
+            lng: poiLng,
+            distance: calculateDistance(lat, lng, poiLat, poiLng),
+          }
+        })
+        .filter(Boolean)
         .sort((a: POI, b: POI) => (a.distance || 0) - (b.distance || 0))
 
-      // Filter based on vibe
+      const seen = new Set()
+      fetchedPOIs = fetchedPOIs.filter(poi => {
+        if (seen.has(poi.name)) return false
+        seen.add(poi.name)
+        return true
+      })
+
       if (vibe === 'quiet') {
+        const quietTypes = ['park', 'memorial', 'artwork', 'viewpoint', 'garden', 'nature']
         fetchedPOIs = fetchedPOIs.filter(poi => 
-          ['park', 'memorial', 'artwork', 'viewpoint', 'garden'].some(t => poi.type.toLowerCase().includes(t))
-        ).slice(0, 8)
+          quietTypes.some(t => poi.type.toLowerCase().includes(t))
+        )
+        if (fetchedPOIs.length < 5) {
+          fetchedPOIs = data.elements
+            .filter((el: any) => el.tags?.name)
+            .slice(0, 10)
+        }
+        fetchedPOIs = fetchedPOIs.slice(0, 12)
       } else if (vibe === 'lively') {
+        const livelyTypes = ['museum', 'attraction', 'monument', 'castle', 'church', 'restaurant', 'bar', 'pub', 'cafe']
         fetchedPOIs = fetchedPOIs.filter(poi => 
-          ['museum', 'attraction', 'monument', 'castle', 'church'].some(t => poi.type.toLowerCase().includes(t))
-        ).slice(0, 12)
+          livelyTypes.some(t => poi.type.toLowerCase().includes(t))
+        )
+        if (fetchedPOIs.length < 5) {
+          fetchedPOIs = data.elements
+            .filter((el: any) => el.tags?.name)
+            .slice(0, 15)
+        }
+        fetchedPOIs = fetchedPOIs.slice(0, 15)
       } else {
-        fetchedPOIs = fetchedPOIs.slice(0, 10)
+        fetchedPOIs = fetchedPOIs.slice(0, 15)
       }
 
-      // Fetch Wikipedia info for each POI (limit to first 8 to avoid rate limiting)
       const poisWithInfo = await Promise.all(
-        fetchedPOIs.slice(0, 8).map(async (poi) => {
+        fetchedPOIs.slice(0, 12).map(async (poi) => {
           const wikiInfo = await fetchWikipediaInfo(poi.name, poi.lat, poi.lng)
           return { ...poi, ...wikiInfo }
         })
@@ -199,14 +236,14 @@ export default function GeneratePage() {
 
   const calculateDistance = (lat1: number, lon1: number, lat2: number, lon2: number): number => {
     const R = 6371e3
-    const φ1 = (lat1 * Math.PI) / 180
-    const φ2 = (lat2 * Math.PI) / 180
-    const Δφ = ((lat2 - lat1) * Math.PI) / 180
-    const Δλ = ((lon2 - lon1) * Math.PI) / 180
+    const p1 = (lat1 * Math.PI) / 180
+    const p2 = (lat2 * Math.PI) / 180
+    const dLat = ((lat2 - lat1) * Math.PI) / 180
+    const dLon = ((lon2 - lon1) * Math.PI) / 180
 
-    const a = Math.sin(Δφ / 2) * Math.sin(Δφ / 2) +
-              Math.cos(φ1) * Math.cos(φ2) *
-              Math.sin(Δλ / 2) * Math.sin(Δλ / 2)
+    const a = Math.sin(dLat / 2) * Math.sin(dLat / 2) +
+              Math.cos(p1) * Math.cos(p2) *
+              Math.sin(dLon / 2) * Math.sin(dLon / 2)
     const c = 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a))
 
     return R * c
@@ -267,7 +304,6 @@ export default function GeneratePage() {
 
   return (
     <div className="min-h-screen bg-gray-50">
-      {/* Header */}
       <header className="bg-white shadow-sm border-b sticky top-0 z-10">
         <div className="container mx-auto px-4 py-4">
           <div className="flex items-center gap-4">
@@ -287,9 +323,7 @@ export default function GeneratePage() {
 
       <main className="container mx-auto px-4 py-8">
         <div className="grid lg:grid-cols-3 gap-8">
-          {/* Form Panel */}
           <div className="lg:col-span-1 space-y-6">
-            {/* Location */}
             <div className="bg-white rounded-xl shadow-sm p-6">
               <div className="flex items-center justify-between mb-4">
                 <div className="flex items-center gap-2">
@@ -320,7 +354,6 @@ export default function GeneratePage() {
               )}
             </div>
 
-            {/* Duration */}
             <div className="bg-white rounded-xl shadow-sm p-6">
               <div className="flex items-center gap-2 mb-4">
                 <Clock className="h-5 w-5 text-blue-600" />
@@ -345,7 +378,6 @@ export default function GeneratePage() {
               </div>
             </div>
 
-            {/* Interests */}
             <div className="bg-white rounded-xl shadow-sm p-6">
               <h2 className="font-bold text-gray-900 mb-4">What do you want to see?</h2>
               <div className="grid grid-cols-2 gap-2">
@@ -366,7 +398,6 @@ export default function GeneratePage() {
               </div>
             </div>
 
-            {/* Vibe */}
             <div className="bg-white rounded-xl shadow-sm p-6">
               <h2 className="font-bold text-gray-900 mb-4">Vibe</h2>
               <div className="grid grid-cols-3 gap-2">
@@ -386,7 +417,6 @@ export default function GeneratePage() {
               </div>
             </div>
 
-            {/* Pace */}
             <div className="bg-white rounded-xl shadow-sm p-6">
               <h2 className="font-bold text-gray-900 mb-4">Pace</h2>
               <div className="grid grid-cols-3 gap-2">
@@ -406,14 +436,12 @@ export default function GeneratePage() {
               </div>
             </div>
 
-            {/* Error Message */}
             {error && (
               <div className="bg-red-50 text-red-600 p-4 rounded-xl text-sm">
                 {error}
               </div>
             )}
 
-            {/* Generate Button */}
             <button
               onClick={handleGenerate}
               disabled={loading || !userLocation || selectedInterests.length === 0}
@@ -433,9 +461,7 @@ export default function GeneratePage() {
             </button>
           </div>
 
-          {/* Map & Results Panel */}
           <div className="lg:col-span-2 space-y-6">
-            {/* Map */}
             <div className="bg-white rounded-xl shadow-sm overflow-hidden" style={{ height: '400px' }}>
               {userLocation ? (
                 <Map 
@@ -453,20 +479,18 @@ export default function GeneratePage() {
               )}
             </div>
 
-            {/* Results */}
             {generated && pois.length > 0 && (
               <div className="bg-white rounded-xl shadow-sm p-6">
                 <div className="flex justify-between items-start mb-6">
                   <div>
                     <h3 className="text-xl font-bold text-gray-900">Your {locationName} Walking Route</h3>
-                    <p className="text-gray-500">{pois.length} stops • ~{formatDistance(totalDistance)} • {estimatedTime} min walk</p>
+                    <p className="text-gray-500">{pois.length} stops - {formatDistance(totalDistance)} - {estimatedTime} min walk</p>
                   </div>
                   <div className="text-right">
-                    <div className="text-sm text-gray-500 capitalize">{vibe} • {pace} pace</div>
+                    <div className="text-sm text-gray-500 capitalize">{vibe} - {pace} pace</div>
                   </div>
                 </div>
 
-                {/* Stops */}
                 <div className="space-y-3">
                   {pois.map((poi, index) => (
                     <div 
@@ -475,7 +499,6 @@ export default function GeneratePage() {
                       onMouseEnter={() => setHoveredPoi(poi.id)}
                       onMouseLeave={() => setHoveredPoi(null)}
                     >
-                      {/* Image or Number */}
                       {poi.image ? (
                         <img 
                           src={poi.image} 
@@ -497,7 +520,6 @@ export default function GeneratePage() {
                         {formatDistance(poi.distance || 0)}
                       </div>
 
-                      {/* Hover Tooltip */}
                       {hoveredPoi === poi.id && poi.summary && (
                         <div className="absolute left-0 right-0 top-full mt-2 z-20 bg-gray-900 text-white p-4 rounded-xl shadow-lg text-sm">
                           <div className="flex items-start gap-2">
@@ -510,37 +532,28 @@ export default function GeneratePage() {
                   ))}
                 </div>
 
-               {/* Actions */}
-<div className="flex gap-4 mt-6">
-  <button
-    onClick={() => {
-      sessionStorage.setItem('activeWalk', JSON.stringify({ pois, locationName }))
-      router.push('/walk/active')
-    }}
-    className="flex-1 py-3 bg-green-600 text-white rounded-xl font-semibold hover:bg-green-700 transition-colors flex items-center justify-center gap-2"
-  >
-    <Navigation className="h-5 w-5" />
-    Start Walk
-  </button>
-  <button
-    onClick={handleSave}
-    className="py-3 px-4 bg-gray-100 text-gray-700 rounded-xl font-semibold hover:bg-gray-200 transition-colors"
-  >
-    <Save className="h-5 w-5" />
-  </button>
-  <button
-    onClick={handleGenerate}
-    className="py-3 px-4 bg-gray-100 text-gray-700 rounded-xl font-semibold hover:bg-gray-200 transition-colors"
-  >
-    <RefreshCw className="h-5 w-5" />
-  </button>
-</div>
+                <div className="flex gap-4 mt-6">
+                  <button
+                    onClick={() => {
+                      sessionStorage.setItem('activeWalk', JSON.stringify({ pois, locationName }))
+                      router.push('/walk/active')
+                    }}
+                    className="flex-1 py-3 bg-green-600 text-white rounded-xl font-semibold hover:bg-green-700 transition-colors flex items-center justify-center gap-2"
+                  >
+                    <Navigation className="h-5 w-5" />
+                    Start Walk
+                  </button>
+                  <button
+                    onClick={handleSave}
+                    className="py-3 px-4 bg-gray-100 text-gray-700 rounded-xl font-semibold hover:bg-gray-200 transition-colors"
+                  >
+                    <Save className="h-5 w-5" />
+                  </button>
                   <button
                     onClick={handleGenerate}
-                    className="flex-1 py-3 bg-gray-100 text-gray-700 rounded-xl font-semibold hover:bg-gray-200 transition-colors flex items-center justify-center gap-2"
+                    className="py-3 px-4 bg-gray-100 text-gray-700 rounded-xl font-semibold hover:bg-gray-200 transition-colors"
                   >
                     <RefreshCw className="h-5 w-5" />
-                    Regenerate
                   </button>
                 </div>
               </div>
