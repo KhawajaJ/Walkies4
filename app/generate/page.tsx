@@ -263,7 +263,7 @@ export default function GeneratePage() {
   }
 
   const totalDistance = pois.reduce((sum, poi) => sum + (poi.distance || 0), 0)
-  const estimatedTime = Math.round(totalDistance / (pace === 'slow' ? 50 : pace === 'fast' ? 83 : 67))
+  const estimatedTime = Math.round(totalDistance / 67)
 
   return (
     <div className="min-h-screen bg-gray-50">
