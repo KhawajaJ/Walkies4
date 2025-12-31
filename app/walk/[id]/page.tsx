@@ -18,7 +18,6 @@ interface POI {
   summary?: string
 }
 
-// Get walk data from sessionStorage (set when starting walk)
 const getWalkData = (): { pois: POI[], locationName: string } | null => {
   if (typeof window === 'undefined') return null
   const data = sessionStorage.getItem('activeWalk')
@@ -33,12 +32,11 @@ export default function ActiveWalkPage() {
   const [distanceToNext, setDistanceToNext] = useState<number | null>(null)
   const [arrived, setArrived] = useState(false)
   const [showInfo, setShowInfo] = useState(false)
-  const [completedStops, setCompletedStops] = useState<Set<number>>(new Set())
+  const [completedStops, setCompletedStops] = useState<number[]>([])
   const [soundEnabled, setSoundEnabled] = useState(true)
   const [watchId, setWatchId] = useState<number | null>(null)
   const [error, setError] = useState('')
 
-  // Load walk data
   useEffect(() => {
     const data = getWalkData()
     if (!data || data.pois.length === 0) {
@@ -48,23 +46,21 @@ export default function ActiveWalkPage() {
     setWalkData(data)
   }, [router])
 
-  // Calculate distance between two points
   const calculateDistance = useCallback((lat1: number, lon1: number, lat2: number, lon2: number): number => {
     const R = 6371e3
-    const φ1 = (lat1 * Math.PI) / 180
-    const φ2 = (lat2 * Math.PI) / 180
-    const Δφ = ((lat2 - lat1) * Math.PI) / 180
-    const Δλ = ((lon2 - lon1) * Math.PI) / 180
+    const p1 = (lat1 * Math.PI) / 180
+    const p2 = (lat2 * Math.PI) / 180
+    const dLat = ((lat2 - lat1) * Math.PI) / 180
+    const dLon = ((lon2 - lon1) * Math.PI) / 180
 
-    const a = Math.sin(Δφ / 2) * Math.sin(Δφ / 2) +
-              Math.cos(φ1) * Math.cos(φ2) *
-              Math.sin(Δλ / 2) * Math.sin(Δλ / 2)
+    const a = Math.sin(dLat / 2) * Math.sin(dLat / 2) +
+              Math.cos(p1) * Math.cos(p2) *
+              Math.sin(dLon / 2) * Math.sin(dLon / 2)
     const c = 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a))
 
     return R * c
   }, [])
 
-  // Play arrival sound
   const playArrivalSound = useCallback(() => {
     if (!soundEnabled) return
     try {
@@ -87,14 +83,12 @@ export default function ActiveWalkPage() {
     }
   }, [soundEnabled])
 
-  // Vibrate on arrival
   const vibrateOnArrival = useCallback(() => {
     if (navigator.vibrate) {
       navigator.vibrate([200, 100, 200])
     }
   }, [])
 
-  // Start watching location
   useEffect(() => {
     if (!walkData) return
 
@@ -109,19 +103,17 @@ export default function ActiveWalkPage() {
         setUserLocation([longitude, latitude])
         setError('')
 
-        // Calculate distance to current POI
         const currentPoi = walkData.pois[currentIndex]
         if (currentPoi) {
           const dist = calculateDistance(latitude, longitude, currentPoi.lat, currentPoi.lng)
           setDistanceToNext(dist)
 
-          // Check if arrived (within 50 meters)
-          if (dist < 50 && !arrived && !completedStops.has(currentIndex)) {
+          if (dist < 50 && !arrived && !completedStops.includes(currentIndex)) {
             setArrived(true)
             setShowInfo(true)
             playArrivalSound()
             vibrateOnArrival()
-            setCompletedStops(prev => new Set([...prev, currentIndex]))
+            setCompletedStops(prev => [...prev, currentIndex])
           }
         }
       },
@@ -177,13 +169,12 @@ export default function ActiveWalkPage() {
   }
 
   const currentPoi = walkData.pois[currentIndex]
-  const progress = ((completedStops.size) / walkData.pois.length) * 100
+  const progress = (completedStops.length / walkData.pois.length) * 100
   const isLastStop = currentIndex === walkData.pois.length - 1
   const route: [number, number][] = walkData.pois.map(p => [p.lng, p.lat])
 
   return (
     <div className="min-h-screen bg-gray-900 flex flex-col">
-      {/* Header */}
       <header className="bg-gray-800 px-4 py-3 flex items-center justify-between">
         <button
           onClick={endWalk}
@@ -205,7 +196,6 @@ export default function ActiveWalkPage() {
         </button>
       </header>
 
-      {/* Progress Bar */}
       <div className="h-1 bg-gray-700">
         <div 
           className="h-full bg-green-500 transition-all duration-500"
@@ -213,7 +203,6 @@ export default function ActiveWalkPage() {
         />
       </div>
 
-      {/* Map */}
       <div className="h-48 relative">
         {userLocation && (
           <Map 
@@ -232,9 +221,7 @@ export default function ActiveWalkPage() {
         )}
       </div>
 
-      {/* Current POI Card */}
       <div className="flex-1 p-4 flex flex-col">
-        {/* Distance Indicator */}
         <div className="text-center mb-4">
           {distanceToNext !== null && (
             <div className={`text-5xl font-bold ${arrived ? 'text-green-500' : 'text-white'}`}>
@@ -246,9 +233,7 @@ export default function ActiveWalkPage() {
           )}
         </div>
 
-        {/* POI Card */}
         <div className="bg-gray-800 rounded-2xl overflow-hidden flex-1 flex flex-col">
-          {/* Image */}
           {currentPoi.image ? (
             <div className="h-40 overflow-hidden">
               <img 
@@ -263,14 +248,13 @@ export default function ActiveWalkPage() {
             </div>
           )}
 
-          {/* Info */}
           <div className="p-4 flex-1">
             <div className="flex items-start justify-between mb-2">
               <div>
                 <h2 className="text-xl font-bold text-white">{currentPoi.name}</h2>
                 <p className="text-gray-400 capitalize">{currentPoi.type}</p>
               </div>
-              {completedStops.has(currentIndex) && (
+              {completedStops.includes(currentIndex) && (
                 <CheckCircle2 className="h-6 w-6 text-green-500" />
               )}
             </div>
@@ -280,7 +264,6 @@ export default function ActiveWalkPage() {
             )}
           </div>
 
-          {/* Navigation Buttons */}
           <div className="p-4 pt-0 flex gap-3">
             <button
               onClick={goToPrevious}
@@ -289,7 +272,7 @@ export default function ActiveWalkPage() {
             >
               Previous
             </button>
-            {isLastStop && completedStops.has(currentIndex) ? (
+            {isLastStop && completedStops.includes(currentIndex) ? (
               <button
                 onClick={endWalk}
                 className="flex-1 py-3 bg-green-600 text-white rounded-xl font-semibold flex items-center justify-center gap-2"
@@ -310,19 +293,18 @@ export default function ActiveWalkPage() {
           </div>
         </div>
 
-        {/* Stop Indicators */}
         <div className="flex justify-center gap-2 mt-4">
           {walkData.pois.map((_, index) => (
             <button
               key={index}
               onClick={() => {
                 setCurrentIndex(index)
-                setArrived(completedStops.has(index))
+                setArrived(completedStops.includes(index))
                 setShowInfo(false)
               }}
               className="p-1"
             >
-              {completedStops.has(index) ? (
+              {completedStops.includes(index) ? (
                 <CheckCircle2 className={`h-4 w-4 ${index === currentIndex ? 'text-green-500' : 'text-green-500/50'}`} />
               ) : (
                 <Circle className={`h-4 w-4 ${index === currentIndex ? 'text-white' : 'text-gray-600'}`} />
@@ -332,10 +314,9 @@ export default function ActiveWalkPage() {
         </div>
       </div>
 
-      {/* Info Modal */}
       {showInfo && currentPoi.summary && (
         <div className="fixed inset-0 bg-black/70 flex items-end justify-center p-4 z-50">
-          <div className="bg-white rounded-2xl w-full max-w-lg overflow-hidden animate-slide-up">
+          <div className="bg-white rounded-2xl w-full max-w-lg overflow-hidden">
             {currentPoi.image && (
               <img 
                 src={currentPoi.image} 
@@ -356,22 +337,6 @@ export default function ActiveWalkPage() {
           </div>
         </div>
       )}
-
-      <style jsx>{`
-        @keyframes slide-up {
-          from {
-            transform: translateY(100%);
-            opacity: 0;
-          }
-          to {
-            transform: translateY(0);
-            opacity: 1;
-          }
-        }
-        .animate-slide-up {
-          animation: slide-up 0.3s ease-out;
-        }
-      `}</style>
     </div>
   )
 }
