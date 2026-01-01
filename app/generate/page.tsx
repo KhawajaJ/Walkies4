@@ -2,7 +2,8 @@
 
 import { useState, useEffect } from 'react'
 import { useRouter } from 'next/navigation'
-import { MapPin, Clock, RefreshCw, Save, ArrowLeft, Sparkles, Navigation, Loader2, Info } from 'lucide-react'
+import { MapPin, Clock, RefreshCw, Save, ArrowLeft, Sparkles, Navigation, Loader2, Info, Globe, Lock, Link, Check } from 'lucide-react'
+import { createClient } from '@/lib/supabase-browser'
 import dynamic from 'next/dynamic'
 
 const Map = dynamic(() => import('@/components/Map'), { ssr: false })
@@ -38,8 +39,10 @@ export default function GeneratePage() {
   const [selectedInterests, setSelectedInterests] = useState<string[]>(['tourism', 'historic'])
   const [vibe, setVibe] = useState('balanced')
   const [pace, setPace] = useState('moderate')
+  const [visibility, setVisibility] = useState('public')
   const [loading, setLoading] = useState(false)
   const [loadingLocation, setLoadingLocation] = useState(false)
+  const [saving, setSaving] = useState(false)
   const [generated, setGenerated] = useState(false)
   const [userLocation, setUserLocation] = useState<[number, number] | null>(null)
   const [locationName, setLocationName] = useState('')
@@ -47,7 +50,11 @@ export default function GeneratePage() {
   const [route, setRoute] = useState<[number, number][]>([])
   const [error, setError] = useState('')
   const [hoveredPoi, setHoveredPoi] = useState<string | null>(null)
+  const [shareLink, setShareLink] = useState('')
+  const [copied, setCopied] = useState(false)
+  const [walkTitle, setWalkTitle] = useState('')
   const router = useRouter()
+  const supabase = createClient()
 
   useEffect(() => {
     getUserLocation()
@@ -73,9 +80,12 @@ export default function GeneratePage() {
             `https://nominatim.openstreetmap.org/reverse?lat=${latitude}&lon=${longitude}&format=json`
           )
           const data = await response.json()
-          setLocationName(data.address?.city || data.address?.town || data.address?.village || 'Your Location')
+          const name = data.address?.city || data.address?.town || data.address?.village || 'Your Location'
+          setLocationName(name)
+          setWalkTitle(`${name} Walking Tour`)
         } catch {
           setLocationName('Your Location')
+          setWalkTitle('Walking Tour')
         }
         
         setLoadingLocation(false)
@@ -85,6 +95,7 @@ export default function GeneratePage() {
         setLoadingLocation(false)
         setUserLocation([13.405, 52.52])
         setLocationName('Berlin (default)')
+        setWalkTitle('Berlin Walking Tour')
       },
       { enableHighAccuracy: true, timeout: 10000 }
     )
@@ -268,6 +279,7 @@ way["${tag}"](around:${radius},${lat},${lng});`
 
     setLoading(true)
     setError('')
+    setShareLink('')
     
     const fetchedPOIs = await fetchPOIs()
     
@@ -283,15 +295,70 @@ way["${tag}"](around:${radius},${lat},${lng});`
     setLoading(false)
   }
 
+  const generateShareId = () => {
+    return Math.random().toString(36).substring(2, 10) + Math.random().toString(36).substring(2, 10)
+  }
+
+  const handleSave = async () => {
+    const { data: { user } } = await supabase.auth.getUser()
+    
+    if (!user) {
+      router.push('/login')
+      return
+    }
+
+    setSaving(true)
+    setError('')
+
+    const shareId = generateShareId()
+    
+    const routeData = {
+      pois,
+      locationName,
+      duration,
+      vibe,
+      pace,
+      interests: selectedInterests,
+    }
+
+    const { data, error: saveError } = await supabase
+      .from('walks')
+      .insert({
+        user_id: user.id,
+        title: walkTitle,
+        description: `A ${vibe} ${duration}-minute walk through ${locationName}`,
+        route_data: routeData,
+        share_id: shareId,
+        visibility: visibility,
+        duration: duration,
+        meeting_point: locationName,
+        is_public: visibility === 'public',
+      })
+      .select()
+      .single()
+
+    if (saveError) {
+      console.error('Save error:', saveError)
+      setError('Failed to save walk. Please try again.')
+      setSaving(false)
+      return
+    }
+
+    const link = `${window.location.origin}/walk/share/${shareId}`
+    setShareLink(link)
+    setSaving(false)
+  }
+
+  const copyShareLink = async () => {
+    await navigator.clipboard.writeText(shareLink)
+    setCopied(true)
+    setTimeout(() => setCopied(false), 2000)
+  }
+
   const toggleInterest = (id: string) => {
     setSelectedInterests(prev =>
       prev.includes(id) ? prev.filter(i => i !== id) : [...prev, id]
     )
-  }
-
-  const handleSave = () => {
-    alert('Walk saved! (This would save to your profile)')
-    router.push('/dashboard')
   }
 
   const formatDistance = (meters: number): string => {
@@ -483,7 +550,12 @@ way["${tag}"](around:${radius},${lat},${lng});`
               <div className="bg-white rounded-xl shadow-sm p-6">
                 <div className="flex justify-between items-start mb-6">
                   <div>
-                    <h3 className="text-xl font-bold text-gray-900">Your {locationName} Walking Route</h3>
+                    <input
+                      type="text"
+                      value={walkTitle}
+                      onChange={(e) => setWalkTitle(e.target.value)}
+                      className="text-xl font-bold text-gray-900 bg-transparent border-b-2 border-transparent hover:border-gray-300 focus:border-blue-500 focus:outline-none"
+                    />
                     <p className="text-gray-500">{pois.length} stops - {formatDistance(totalDistance)} - {estimatedTime} min walk</p>
                   </div>
                   <div className="text-right">
@@ -491,7 +563,7 @@ way["${tag}"](around:${radius},${lat},${lng});`
                   </div>
                 </div>
 
-                <div className="space-y-3">
+                <div className="space-y-3 mb-6">
                   {pois.map((poi, index) => (
                     <div 
                       key={poi.id} 
@@ -532,7 +604,68 @@ way["${tag}"](around:${radius},${lat},${lng});`
                   ))}
                 </div>
 
-                <div className="flex gap-4 mt-6">
+                {/* Visibility Toggle */}
+                <div className="bg-gray-50 rounded-xl p-4 mb-6">
+                  <h3 className="font-semibold text-gray-900 mb-3">Visibility</h3>
+                  <div className="grid grid-cols-2 gap-3">
+                    <button
+                      onClick={() => setVisibility('public')}
+                      className={`flex items-center gap-3 p-3 rounded-xl transition-all ${
+                        visibility === 'public'
+                          ? 'bg-blue-100 border-2 border-blue-500'
+                          : 'bg-white border-2 border-gray-200 hover:border-gray-300'
+                      }`}
+                    >
+                      <Globe className={`h-5 w-5 ${visibility === 'public' ? 'text-blue-600' : 'text-gray-400'}`} />
+                      <div className="text-left">
+                        <div className={`font-medium ${visibility === 'public' ? 'text-blue-700' : 'text-gray-700'}`}>Public</div>
+                        <div className="text-xs text-gray-500">Anyone can view & join</div>
+                      </div>
+                    </button>
+                    <button
+                      onClick={() => setVisibility('private')}
+                      className={`flex items-center gap-3 p-3 rounded-xl transition-all ${
+                        visibility === 'private'
+                          ? 'bg-blue-100 border-2 border-blue-500'
+                          : 'bg-white border-2 border-gray-200 hover:border-gray-300'
+                      }`}
+                    >
+                      <Lock className={`h-5 w-5 ${visibility === 'private' ? 'text-blue-600' : 'text-gray-400'}`} />
+                      <div className="text-left">
+                        <div className={`font-medium ${visibility === 'private' ? 'text-blue-700' : 'text-gray-700'}`}>Private</div>
+                        <div className="text-xs text-gray-500">Only you can see</div>
+                      </div>
+                    </button>
+                  </div>
+                </div>
+
+                {/* Share Link */}
+                {shareLink && (
+                  <div className="bg-green-50 rounded-xl p-4 mb-6">
+                    <div className="flex items-center gap-2 text-green-700 mb-2">
+                      <Check className="h-5 w-5" />
+                      <span className="font-semibold">Walk Saved!</span>
+                    </div>
+                    <div className="flex gap-2">
+                      <input
+                        type="text"
+                        value={shareLink}
+                        readOnly
+                        className="flex-1 px-3 py-2 bg-white rounded-lg text-sm text-gray-600 border border-green-200"
+                      />
+                      <button
+                        onClick={copyShareLink}
+                        className="px-4 py-2 bg-green-600 text-white rounded-lg font-medium hover:bg-green-700 transition-colors flex items-center gap-2"
+                      >
+                        {copied ? <Check className="h-4 w-4" /> : <Link className="h-4 w-4" />}
+                        {copied ? 'Copied!' : 'Copy'}
+                      </button>
+                    </div>
+                  </div>
+                )}
+
+                {/* Actions */}
+                <div className="flex gap-4">
                   <button
                     onClick={() => {
                       sessionStorage.setItem('activeWalk', JSON.stringify({ pois, locationName }))
@@ -545,9 +678,15 @@ way["${tag}"](around:${radius},${lat},${lng});`
                   </button>
                   <button
                     onClick={handleSave}
-                    className="py-3 px-4 bg-gray-100 text-gray-700 rounded-xl font-semibold hover:bg-gray-200 transition-colors"
+                    disabled={saving || !!shareLink}
+                    className="flex-1 py-3 bg-blue-600 text-white rounded-xl font-semibold hover:bg-blue-700 disabled:opacity-50 transition-colors flex items-center justify-center gap-2"
                   >
-                    <Save className="h-5 w-5" />
+                    {saving ? (
+                      <Loader2 className="h-5 w-5 animate-spin" />
+                    ) : (
+                      <Save className="h-5 w-5" />
+                    )}
+                    {shareLink ? 'Saved!' : saving ? 'Saving...' : 'Save & Share'}
                   </button>
                   <button
                     onClick={handleGenerate}
